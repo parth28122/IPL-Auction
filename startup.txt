@@ -1,0 +1,100 @@
+================================================================================
+                    IPL AUCTION ARENA - STARTUP GUIDE
+================================================================================
+
+--------------------------------------------------------------------------------
+1. PASTE YOUR GEMINI API KEY IN .env
+--------------------------------------------------------------------------------
+Open the file named ".env" in either the root folder or inside the "backend" folder:
+    D:\IPl_Auction\.env
+    D:\IPl_Auction\backend\.env
+
+Replace "YOUR_GEMINI_API_KEY_HERE" with your actual key from Google AI Studio:
+    GEMINI_API_KEY=AIzaSy...YourActualKeyHere...
+
+(If you don't have a key yet, get a free key from: https://aistudio.google.com/app/apikey)
+*Note: The app will run smoothly even without a key using authentic built-in fallback commentary!*
+
+
+--------------------------------------------------------------------------------
+2. START THE BACKEND (TERMINAL 1)
+--------------------------------------------------------------------------------
+Open PowerShell or Command Prompt (CMD) in the project directory (D:\IPl_Auction):
+
+Step 1: Go into the backend directory:
+    cd D:\IPl_Auction\backend
+
+Step 2: Create Python Virtual Environment (only needed once):
+    python -m venv venv
+
+Step 3: Activate the Virtual Environment:
+    - On Windows PowerShell:
+        .\venv\Scripts\Activate.ps1
+      (If PowerShell says script execution is disabled, run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass, then activate again)
+    - On Windows Command Prompt (CMD):
+        .\venv\Scripts\activate.bat
+    - On Mac/Linux:
+        source venv/bin/activate
+
+Step 4: Install Python dependencies:
+    pip install -r requirements.txt
+
+Step 5: Start the FastAPI Backend Server:
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+The backend is now live at:
+    API URL:  http://localhost:8000
+    API Docs: http://localhost:8000/docs
+
+
+--------------------------------------------------------------------------------
+3. START THE FRONTEND (TERMINAL 2)
+--------------------------------------------------------------------------------
+Open a SECOND terminal window in the project directory (D:\IPl_Auction):
+
+Step 1: Go into the frontend directory:
+    cd D:\IPl_Auction\frontend
+
+Step 2: Install Node dependencies (only needed once):
+    npm install
+
+Step 3: Start the Next.js frontend development server:
+    npm run dev
+
+The frontend is now running at:
+    App URL: http://localhost:3000
+
+
+--------------------------------------------------------------------------------
+4. OPEN AND PLAY
+--------------------------------------------------------------------------------
+1. Open your web browser and navigate to:
+    http://localhost:3000
+
+2. Choose:
+    - "Solo Arena vs AI Bots" to play instantly against CSK, MI, and RCB bots!
+    - OR "Create Multiplayer Room" and share the room code with friends!
+
+3. Phases:
+    - Phase 1: Live Auction room (₹120 Cr budget, ₹80 Cr marquee cap, 5s live hammer countdown, +20L/+50L/+1Cr bids, news ticker broadcasts, mid-auction squad breakdown & upcoming set explorer).
+    - Phase 2: Drag-and-drop your Playing XI (Slots 1 to 11) + 7 Bench slots with tactical validations, 18-player squad minimum requirement, and 2.5-minute auto-deadline countdown.
+    - Phase 3: Crown your Captain (analyzes IPL, SMAT, BBL, SA20 & domestic leadership stats) and view the Gemini 2.5 Flash / ESPN-Cricinfo tournament verdict!
+
+
+--------------------------------------------------------------------------------
+5. CREATOR & CONNECT
+--------------------------------------------------------------------------------
+Created by Parth Dange
+LinkedIn: https://www.linkedin.com/in/parth-dange-978087293/
+Email:    parthdange680@gmail.com
+
+
+--------------------------------------------------------------------------------
+6. QUICK ONE-LINER SHORTCUTS
+--------------------------------------------------------------------------------
+PowerShell Quick Command to launch Backend:
+    cd D:\IPl_Auction\backend; .\venv\Scripts\Activate.ps1; uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+PowerShell Quick Command to launch Frontend:
+    cd D:\IPl_Auction\frontend; npm run dev
+================================================================================

@@ -1,0 +1,31 @@
+Set-Content -Path .gitignore -Value @"
+# Environment & Secret files
+.env
+.env.*
+!.env.example
+*.env
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Node / Frontend
+frontend/node_modules/
+node_modules/
+frontend/.next/
+.next/
+out/
+build/
+dist/
+
+# System / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+"@

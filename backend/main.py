@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -8,7 +9,7 @@ from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from room_manager import RoomManager, TOTAL_BUDGET_LAKHS, MARQUEE_CAP_LAKHS
 
@@ -20,15 +21,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-app = FastAPI(title="IPL Auction Arena API", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="IPL Auction Arena API", 
+    version="1.0.0",
+    description="Live multiplayer IPL Auction simulator with real-time bidding, tactical Playing XI formation, and Cricinfo editorial verdicts."
 )
+
+# CORS setup
+cors_origins_raw = os.getenv("CORS_ORIGINS", "*")
+if cors_origins_raw == "*":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    allowed_origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Load Players Data
 DATA_PATH = Path(__file__).parent / "data" / "players.json"
@@ -44,17 +61,22 @@ room_manager = RoomManager(PLAYERS_DATA)
 
 # Request Models
 class CreateRoomRequest(BaseModel):
-    name: Optional[str] = "IPL Mega Auction"
-    room_id: Optional[str] = None
+    name: Optional[str] = Field(default="IPL Mega Auction", max_length=50)
+    room_id: Optional[str] = Field(default=None, max_length=32)
 
 class AddBotsRequest(BaseModel):
-    count: Optional[int] = 3
+    count: Optional[int] = Field(default=3, ge=1, le=8)
 
 class SubmitLineupRequest(BaseModel):
     team_id: str
     playing_xi: List[str]
     bench: List[str]
     captain_id: Optional[str] = None
+
+def sanitize_id(raw_id: str) -> str:
+    """Ensures identifiers contain only safe characters."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", raw_id.strip().lower())
+    return cleaned[:32] if cleaned else str(uuid.uuid4())[:8]
 
 @app.get("/health")
 def health_check():
@@ -74,8 +96,9 @@ def get_players():
 
 @app.post("/api/rooms")
 def create_room(req: CreateRoomRequest):
-    room_id = req.room_id or str(uuid.uuid4())[:8]
-    room = room_manager.get_or_create_room(room_id, req.name or "IPL Mega Auction")
+    raw_id = req.room_id or str(uuid.uuid4())[:8]
+    clean_room_id = sanitize_id(raw_id)
+    room = room_manager.get_or_create_room(clean_room_id, req.name or "IPL Mega Auction")
     return {
         "room_id": room.room_id,
         "name": room.name,
@@ -84,27 +107,20 @@ def create_room(req: CreateRoomRequest):
 
 @app.get("/api/rooms/{room_id}")
 def get_room_details(room_id: str):
-    room = room_manager.get_room(room_id)
+    clean_room_id = sanitize_id(room_id)
+    room = room_manager.get_room(clean_room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     return room.get_state()
 
 @app.post("/api/rooms/{room_id}/bots")
 def add_bots_to_room(room_id: str, req: AddBotsRequest):
-    room = room_manager.get_room(room_id)
+    clean_room_id = sanitize_id(room_id)
+    room = room_manager.get_room(clean_room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     added = room.add_bots(req.count or 3)
     return {"success": True, "added_bots": added, "state": room.get_state()}
-
-@app.post("/api/rooms/{room_id}/auto-distribute")
-async def auto_distribute_room(room_id: str, team_id: Optional[str] = None):
-    room = room_manager.get_room(room_id)
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    room.auto_distribute_and_build(team_id)
-    await room.broadcast_state()
-    return {"success": True, "state": room.get_state()}
 
 @app.get("/api/captains/{player_id}")
 def get_captain_profile(player_id: str):
@@ -116,7 +132,8 @@ def get_captain_profile(player_id: str):
 
 @app.get("/api/rooms/{room_id}/pool/{pool_name}")
 def get_room_pool_players(room_id: str, pool_name: str):
-    room = room_manager.get_room(room_id)
+    clean_room_id = sanitize_id(room_id)
+    room = room_manager.get_room(clean_room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     pool_players = [p for p in room.all_players if p.get("pool") == pool_name]
@@ -143,15 +160,22 @@ def get_room_pool_players(room_id: str, pool_name: str):
 
 @app.websocket("/ws/{room_id}/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str):
+    clean_room_id = sanitize_id(room_id)
+    clean_client_id = re.sub(r"[^a-zA-Z0-9_-]", "", client_id.strip())[:36]
+
     await websocket.accept()
-    room = room_manager.get_or_create_room(room_id)
-    room.connections[client_id] = websocket
-    logger.info(f"Client {client_id} connected to room {room_id}")
+    room = room_manager.get_or_create_room(clean_room_id)
+    room.connections[clean_client_id] = websocket
+    
+    if not room.host_id:
+        room.host_id = clean_client_id
+
+    logger.info(f"Client {clean_client_id} connected to room {clean_room_id} (Host: {room.host_id})")
 
     # Immediately push current room state
     await websocket.send_text(json.dumps({
         "type": "INITIAL_STATE",
-        "client_id": client_id,
+        "client_id": clean_client_id,
         "state": room.get_state(),
         "constants": {
             "total_budget": TOTAL_BUDGET_LAKHS,
@@ -170,33 +194,28 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str)
             event_type = data.get("type")
             payload = data.get("payload", {})
 
-            logger.info(f"Room {room_id} | Event: {event_type} | Client: {client_id}")
+            logger.info(f"Room {clean_room_id} | Event: {event_type} | Client: {clean_client_id}")
 
+            # SECURITY: enforce that client actions are ALWAYS bound to clean_client_id
             if event_type == "JOIN_ROOM":
-                team_id = payload.get("team_id", client_id)
-                team_name = payload.get("team_name", f"Team {client_id[:4]}")
-                color = payload.get("color", "#3B82F6")
-                room.add_team(team_id, team_name, is_bot=False, color=color)
+                owner_name = str(payload.get("owner_name", "")).strip()[:30]
+                team_name = str(payload.get("team_name", f"Team {clean_client_id[:4]}"))[:30]
+                color = str(payload.get("color", "#3B82F6"))[:10]
+                room.add_team(clean_client_id, team_name, is_bot=False, color=color, owner_name=owner_name)
                 await room.broadcast_state()
 
             elif event_type == "ADD_BOTS":
                 count = int(payload.get("count", 3))
-                room.add_bots(count)
+                room.add_bots(min(8, max(1, count)))
                 await room.broadcast_state()
 
             elif event_type == "START_AUCTION":
                 room.start_auction()
                 await room.broadcast_state()
 
-            elif event_type == "AUTO_DISTRIBUTE":
-                team_id = payload.get("team_id", client_id)
-                room.auto_distribute_and_build(team_id)
-                await room.broadcast_state()
-
             elif event_type == "BID":
-                team_id = payload.get("team_id", client_id)
                 increment = int(payload.get("increment", 20))
-                res = await room.place_bid(team_id, increment)
+                res = await room.place_bid(clean_client_id, increment)
                 if not res.get("success"):
                     await websocket.send_text(json.dumps({
                         "type": "BID_REJECTED",
@@ -204,15 +223,13 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str)
                     }))
 
             elif event_type == "PASS":
-                team_id = payload.get("team_id", client_id)
-                await room.pass_player(team_id)
+                await room.pass_player(clean_client_id)
 
             elif event_type == "SUBMIT_LINEUP":
-                team_id = payload.get("team_id", client_id)
-                playing_xi = payload.get("playing_xi", [])
-                bench = payload.get("bench", [])
-                captain_id = payload.get("captain_id")
-                res = await room.submit_lineup(team_id, playing_xi, bench, captain_id)
+                playing_xi = [str(pid) for pid in payload.get("playing_xi", [])]
+                bench = [str(pid) for pid in payload.get("bench", [])]
+                captain_id = str(payload.get("captain_id")) if payload.get("captain_id") else None
+                res = await room.submit_lineup(clean_client_id, playing_xi, bench, captain_id)
                 await websocket.send_text(json.dumps({
                     "type": "LINEUP_RESPONSE",
                     "result": res
@@ -220,17 +237,26 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str)
                 await room.broadcast_state()
 
             elif event_type == "CROWN_CAPTAIN":
-                team_id = payload.get("team_id", client_id)
                 captain_id = payload.get("captain_id")
-                team = room.teams.get(team_id)
+                team = room.teams.get(clean_client_id)
                 if team and captain_id:
-                    team.captain_id = captain_id
+                    team.captain_id = str(captain_id)
                     await room.broadcast_state()
 
             elif event_type == "TRIGGER_EVALUATION":
                 await room.run_tournament_evaluation()
 
+            elif event_type == "SEND_CHAT":
+                text = str(payload.get("text", "")).strip()[:300]
+                if text:
+                    await room.add_chat_message(clean_client_id, text)
+
             elif event_type == "RESET_AUCTION":
+                # Only room host can reset the auction
+                if room.host_id and clean_client_id != room.host_id:
+                    logger.warning(f"Unauthorized reset attempt by non-host {clean_client_id} in {clean_room_id}")
+                    continue
+
                 room.status = "LOBBY"
                 for t in room.teams.values():
                     t.budget = TOTAL_BUDGET_LAKHS
@@ -241,6 +267,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str)
                     t.captain_id = None
                     t.lineup_submitted = False
                     t.evaluation_result = None
+                    t.is_eliminated = False
+                    t.elimination_reason = None
                 room.current_player = None
                 room.current_player_index = -1
                 room.highest_bidder_id = None
@@ -256,15 +284,19 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str)
                 room.auctioned_players = {}
                 if room.timer_task and not room.timer_task.done():
                     room.timer_task.cancel()
+                if room.lineup_timer_task and not room.lineup_timer_task.done():
+                    room.lineup_timer_task.cancel()
                 await room.broadcast_state()
 
     except WebSocketDisconnect:
-        logger.info(f"Client {client_id} disconnected from room {room_id}")
-        room.connections.pop(client_id, None)
+        logger.info(f"Client {clean_client_id} disconnected from room {clean_room_id}")
+        room.connections.pop(clean_client_id, None)
     except Exception as e:
-        logger.error(f"WebSocket error for client {client_id}: {e}", exc_info=True)
-        room.connections.pop(client_id, None)
+        logger.error(f"WebSocket error for client {clean_client_id}: {e}", exc_info=True)
+        room.connections.pop(clean_client_id, None)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    uvicorn.run("main:app", host=host, port=port, reload=True)

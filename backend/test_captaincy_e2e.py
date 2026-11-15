@@ -68,12 +68,14 @@ async def test_captaincy_system():
     # Distribute players
     room.auto_distribute_and_build("user_ishan")
 
-    # Force ishan_kishan into team1 playing_xi and pat_cummins into team2 playing_xi
-    if "ishan_kishan" not in team1.playing_xi:
-        team1.playing_xi[0] = "ishan_kishan"
+    # Force ishan_kishan into team1 squad & playing_xi and pat_cummins into team2 squad & playing_xi
+    old_p1 = team1.playing_xi[0]
+    team1.playing_xi[0] = "ishan_kishan"
+    team1.players = [room.players_map["ishan_kishan"] if p["id"] == old_p1 else p for p in team1.players]
 
-    if "pat_cummins" not in team2.playing_xi:
-        team2.playing_xi[0] = "pat_cummins"
+    old_p2 = team2.playing_xi[0]
+    team2.playing_xi[0] = "pat_cummins"
+    team2.players = [room.players_map["pat_cummins"] if p["id"] == old_p2 else p for p in team2.players]
 
     # Submit lineups with explicit captains
     sub1 = await room.submit_lineup("user_ishan", team1.playing_xi, team1.bench, captain_id="ishan_kishan")

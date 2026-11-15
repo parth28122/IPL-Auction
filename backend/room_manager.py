@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import time
+import uuid
 from typing import Dict, List, Optional, Set, Any
 from fastapi import WebSocket
 
@@ -142,9 +143,10 @@ BOT_FRANCHISES = [
 ]
 
 class Team:
-    def __init__(self, team_id: str, name: str, is_bot: bool = False, color: str = "#3B82F6"):
+    def __init__(self, team_id: str, name: str, is_bot: bool = False, color: str = "#3B82F6", owner_name: Optional[str] = None):
         self.team_id = team_id
         self.name = name
+        self.owner_name = owner_name or ("AI Franchise" if is_bot else name)
         self.is_bot = is_bot
         self.color = color
         self.budget = TOTAL_BUDGET_LAKHS
@@ -162,6 +164,7 @@ class Team:
         return {
             "team_id": self.team_id,
             "name": self.name,
+            "owner_name": self.owner_name,
             "is_bot": self.is_bot,
             "color": self.color,
             "budget": self.budget,
@@ -181,13 +184,17 @@ class Team:
 
 class Room:
     def __init__(self, room_id: str, name: str, all_players: List[Dict[str, Any]]):
-        self.room_id = room_id
+        self.room_id = room_id.strip().lower()
         self.name = name
         self.all_players = [normalize_player(p) for p in all_players]
         self.players_map = {p["id"]: p for p in self.all_players}
         
         self.teams: Dict[str, Team] = {}
         self.connections: Dict[str, WebSocket] = {}
+        self.host_id: Optional[str] = None
+        self.bid_lock = asyncio.Lock()
+        self.created_at = time.time()
+        self.last_active = time.time()
         
         self.status = "LOBBY"  # LOBBY, AUCTION_ACTIVE, AUCTION_COMPLETED, LINEUP_PHASE, EVALUATED
         
@@ -214,6 +221,7 @@ class Room:
         self.current_pool: Optional[str] = "Marquee Set 1"
         self.latest_set_transition: Optional[Dict[str, Any]] = None
         self.auctioned_players: Dict[str, Dict[str, Any]] = {}
+        self.chat_messages: List[Dict[str, Any]] = []
 
     def get_pools_summary(self) -> List[Dict[str, Any]]:
         ordered_pool_names = []
@@ -273,6 +281,7 @@ class Room:
         return {
             "room_id": self.room_id,
             "name": self.name,
+            "host_id": self.host_id,
             "status": self.status,
             "teams": {tid: team.to_dict() for tid, team in self.teams.items()},
             "current_player": self.current_player,
@@ -293,8 +302,44 @@ class Room:
             "upcoming_players": [p for p in self.players_queue[self.current_player_index + 1 : self.current_player_index + 26]],
             "current_set_players": self.get_current_set_players(),
             "pools_summary": self.get_pools_summary(),
-            "lineup_timer": self.lineup_timer
+            "lineup_timer": self.lineup_timer,
+            "chat_messages": self.chat_messages[-50:]
         }
+
+    async def add_chat_message(self, client_id: str, text: str) -> Dict[str, Any]:
+        team = self.teams.get(client_id)
+        sender_name = team.owner_name if team and team.owner_name else (team.name if team else "War Room Scout")
+        sender_team = team.name if team else None
+        sender_color = team.color if team else "#F59E0B"
+        is_host = bool(self.host_id and client_id == self.host_id)
+
+        clean_text = str(text).strip()[:300]
+        if not clean_text:
+            return {}
+
+        msg = {
+            "id": f"msg_{uuid.uuid4().hex[:8]}",
+            "sender_id": client_id,
+            "sender_name": sender_name,
+            "sender_team": sender_team,
+            "sender_color": sender_color,
+            "is_host": is_host,
+            "text": clean_text,
+            "timestamp": time.time()
+        }
+
+        self.chat_messages.append(msg)
+        if len(self.chat_messages) > 100:
+            self.chat_messages = self.chat_messages[-100:]
+
+        self.last_active = time.time()
+
+        await self.broadcast({
+            "type": "CHAT_MESSAGE",
+            "message": msg
+        })
+
+        return msg
 
     async def broadcast(self, message: Dict[str, Any]):
         dead_clients = []
@@ -313,9 +358,31 @@ class Room:
             "state": self.get_state()
         })
 
-    def add_team(self, team_id: str, name: str, is_bot: bool = False, color: str = "#3B82F6") -> Team:
+    def add_team(self, team_id: str, name: str, is_bot: bool = False, color: str = "#3B82F6", owner_name: Optional[str] = None) -> Team:
+        if not self.host_id and not is_bot:
+            self.host_id = team_id
+
+        # Disambiguate duplicate team names
+        existing_names = {t.name.strip().lower() for tid, t in self.teams.items() if tid != team_id}
+        final_name = name.strip()
+        counter = 2
+        while final_name.lower() in existing_names:
+            final_name = f"{name.strip()} {counter}"
+            counter += 1
+
+        clean_owner = (owner_name or "").strip()
+        if not clean_owner:
+            clean_owner = "AI Franchise" if is_bot else final_name
+
         if team_id not in self.teams:
-            self.teams[team_id] = Team(team_id, name, is_bot=is_bot, color=color)
+            self.teams[team_id] = Team(team_id, final_name, is_bot=is_bot, color=color, owner_name=clean_owner)
+        else:
+            if self.status == "LOBBY":
+                self.teams[team_id].name = final_name
+                self.teams[team_id].color = color
+                self.teams[team_id].owner_name = clean_owner
+
+        self.last_active = time.time()
         return self.teams[team_id]
 
     def add_bots(self, count: int = 3):
@@ -459,48 +526,69 @@ class Room:
 
     async def check_bot_bids(self):
         """Simulates realistic AI Franchise bidding strategy."""
-        if not self.current_player:
+        if not self.current_player or self.status != "AUCTION_ACTIVE":
             return
 
-        # Trigger during 5-second countdown if bot wants this player
+        # Trigger during countdown if bot wants this player
         if self.timer not in [4, 3, 2, 1]:
             return
 
-        bots = [t for t in self.teams.values() if t.is_bot and t.team_id != self.highest_bidder_id]
+        bots = [t for t in self.teams.values() if t.is_bot and t.team_id != self.highest_bidder_id and t.team_id not in self.passed_teams]
         if not bots:
+            return
+
+        # Prevent bot-only rapid bidding cascades (max 3 consecutive bot bids)
+        consecutive_bot_bids = 0
+        for b in reversed(self.bid_history):
+            if b.get("team_id", "").startswith("bot_"):
+                consecutive_bot_bids += 1
+            else:
+                break
+        if consecutive_bot_bids >= 3:
             return
 
         random.shuffle(bots)
         bot = bots[0]
 
         # Bid increment
-        increments = [20, 50, 100]
-        increment = random.choice(increments)
-        new_bid = self.current_bid + increment if self.highest_bidder_id else self.current_bid
+        increment = 20 if random.random() < 0.8 else 50
+        new_bid = self.current_bid + increment if self.highest_bidder_id else self.current_player.get("base_price", 100)
 
         # Check budget
         if bot.budget < new_bid:
+            self.passed_teams.add(bot.team_id)
+            return
+
+        # Reserve budget check for bot (mandatory 18 player squad)
+        needed_after = max(0, 18 - (len(bot.players) + 1))
+        min_reserve = needed_after * 30
+        if bot.budget - new_bid < min_reserve:
+            self.passed_teams.add(bot.team_id)
             return
 
         # Check marquee cap (Max 80 Cr = 8000 Lakhs)
         is_marquee = self.current_player.get("category") == "Marquee"
         if is_marquee and (bot.marquee_spent + new_bid > MARQUEE_CAP_LAKHS):
+            self.passed_teams.add(bot.team_id)
             return
 
         # Overseas cap check (squad max 8)
-        is_overseas = self.current_player.get("is_overseas", False)
-        overseas_in_squad = len([p for p in bot.players if p.get("is_overseas")])
+        is_overseas = bool(self.current_player.get("is_overseas") or self.current_player.get("country") == "Overseas")
+        overseas_in_squad = len([p for p in bot.players if p.get("is_overseas") or p.get("country") == "Overseas"])
         if is_overseas and overseas_in_squad >= 8:
+            self.passed_teams.add(bot.team_id)
             return
 
         # Squad limit check (max 18)
         if len(bot.players) >= 18:
+            self.passed_teams.add(bot.team_id)
             return
 
         # Decision threshold based on player quality & role necessity
         player_price_cr = new_bid / 100.0
-        if not is_marquee and player_price_cr > 15.0:
-            if random.random() > 0.3:
+        if not is_marquee and player_price_cr > 14.0:
+            if random.random() < 0.75:
+                self.passed_teams.add(bot.team_id)
                 return
 
         # 45% chance bot bids on this tick
@@ -508,67 +596,99 @@ class Room:
             await self.place_bid(bot.team_id, increment if self.highest_bidder_id else 0)
 
     async def place_bid(self, team_id: str, increment: int = 20) -> Dict[str, Any]:
-        if self.status != "AUCTION_ACTIVE" or not self.current_player:
-            return {"success": False, "message": "Auction is not active"}
+        async with self.bid_lock:
+            if self.status != "AUCTION_ACTIVE" or not self.current_player:
+                return {"success": False, "message": "Auction is not active"}
 
-        team = self.teams.get(team_id)
-        if not team:
-            return {"success": False, "message": "Team not found"}
+            team = self.teams.get(team_id)
+            if not team:
+                return {"success": False, "message": "Team not found"}
 
-        if self.highest_bidder_id == team_id:
-            return {"success": False, "message": "You already hold the highest bid"}
+            if self.highest_bidder_id == team_id:
+                return {"success": False, "message": "You already hold the highest bid"}
 
-        # Calculate new bid amount
-        if self.highest_bidder_id is None:
-            new_amount = self.current_player.get("base_price", 100)
-        else:
-            new_amount = self.current_bid + increment
+            if team_id in self.passed_teams:
+                return {"success": False, "message": "You already passed on this player"}
 
-        # 1. Budget validation
-        if team.budget < new_amount:
-            return {"success": False, "message": f"Insufficient purse! Remaining: ₹{team.budget/100:.2f} Cr, Required: ₹{new_amount/100:.2f} Cr"}
+            # Squad capacity check: max 18 players
+            if len(team.players) >= 18:
+                return {"success": False, "message": "Squad is full! You have already acquired the maximum 18 players."}
 
-        # 2. Marquee cap validation (Max ₹80 Cr = 8000 Lakhs)
-        is_marquee = self.current_player.get("category") == "Marquee"
-        if is_marquee:
-            if team.marquee_spent + new_amount > MARQUEE_CAP_LAKHS:
-                remaining_marquee = (MARQUEE_CAP_LAKHS - team.marquee_spent) / 100.0
+            # Overseas player cap check: max 8 overseas
+            is_overseas = bool(self.current_player.get("is_overseas") or self.current_player.get("country") == "Overseas")
+            current_overseas = len([p for p in team.players if p.get("is_overseas") or p.get("country") == "Overseas"])
+            if is_overseas and current_overseas >= 8:
+                return {"success": False, "message": "Overseas limit reached! A squad can have at most 8 overseas players."}
+
+            # Validate increment
+            if increment not in [0, 20, 50, 100]:
+                return {"success": False, "message": "Invalid bid increment"}
+
+            # Calculate new bid amount
+            if self.highest_bidder_id is None:
+                new_amount = self.current_player.get("base_price", 100)
+            else:
+                inc = increment if increment > 0 else 20
+                new_amount = self.current_bid + inc
+
+            # 1. Budget validation
+            if team.budget < new_amount:
+                return {"success": False, "message": f"Insufficient purse! Remaining: ₹{team.budget/100:.2f} Cr, Required: ₹{new_amount/100:.2f} Cr"}
+
+            # 2. Reserve purse check (must keep enough purse to fill 18 players at min base price 30L)
+            needed_after = max(0, 18 - (len(team.players) + 1))
+            min_reserve = needed_after * 30
+            if team.budget - new_amount < min_reserve:
                 return {
                     "success": False,
-                    "message": f"Marquee cap violated! ₹80 Cr limit. You have ₹{remaining_marquee:.2f} Cr remaining in Marquee budget."
+                    "message": f"Reserve budget rule: You must keep at least ₹{min_reserve/100:.2f} Cr to complete your mandatory 18-player squad!"
                 }
 
-        # Successful bid
-        self.current_bid = new_amount
-        self.highest_bidder_id = team_id
-        self.highest_bidder_name = team.name
+            # 3. Marquee cap validation (Max ₹80 Cr = 8000 Lakhs)
+            is_marquee = self.current_player.get("category") == "Marquee"
+            if is_marquee:
+                if team.marquee_spent + new_amount > MARQUEE_CAP_LAKHS:
+                    remaining_marquee = (MARQUEE_CAP_LAKHS - team.marquee_spent) / 100.0
+                    return {
+                        "success": False,
+                        "message": f"Marquee cap violated! ₹80 Cr limit. You have ₹{remaining_marquee:.2f} Cr remaining in Marquee budget."
+                    }
 
-        # Reset timer to 10 seconds on each new bid as per business logic!
-        self.timer = TIMER_DURATION
-        self.passed_teams.discard(team_id)
+            # Successful bid
+            owner = team.owner_name if team.owner_name and team.owner_name != team.name else None
+            display_name = f"{owner} ({team.name})" if owner else team.name
 
-        bid_record = {
-            "team_id": team_id,
-            "team_name": team.name,
-            "amount": new_amount,
-            "timestamp": time.time()
-        }
-        self.bid_history.append(bid_record)
-        self.auction_feed.append({
-            "message": f"💰 {team.name} bid ₹{new_amount/100:.2f} Cr for {self.current_player['name']}",
-            "timestamp": time.time()
-        })
+            self.current_bid = new_amount
+            self.highest_bidder_id = team_id
+            self.highest_bidder_name = display_name
 
-        await self.broadcast({
-            "type": "BID_ACCEPTED",
-            "team_id": team_id,
-            "team_name": team.name,
-            "amount": new_amount,
-            "timer": self.timer,
-            "bid_history": self.bid_history[-10:],
-            "auction_feed": self.auction_feed[-15:]
-        })
-        return {"success": True, "amount": new_amount}
+            # Reset timer on each new bid
+            self.timer = TIMER_DURATION
+            self.passed_teams.discard(team_id)
+            self.last_active = time.time()
+
+            bid_record = {
+                "team_id": team_id,
+                "team_name": display_name,
+                "amount": new_amount,
+                "timestamp": time.time()
+            }
+            self.bid_history.append(bid_record)
+            self.auction_feed.append({
+                "message": f"💰 {display_name} bid ₹{new_amount/100:.2f} Cr for {self.current_player['name']}",
+                "timestamp": time.time()
+            })
+
+            await self.broadcast({
+                "type": "BID_ACCEPTED",
+                "team_id": team_id,
+                "team_name": team.name,
+                "amount": new_amount,
+                "timer": self.timer,
+                "bid_history": self.bid_history[-10:],
+                "auction_feed": self.auction_feed[-15:]
+            })
+            return {"success": True, "amount": new_amount}
 
     async def pass_player(self, team_id: str) -> Dict[str, Any]:
         if self.status != "AUCTION_ACTIVE" or not self.current_player:
@@ -679,6 +799,14 @@ class Room:
 
         await asyncio.sleep(2.0)
         if self.status == "AUCTION_ACTIVE":
+            # Natural completion: all teams recruited full 18-player squads, or no team has budget left to bid
+            all_squads_full = len(self.teams) > 0 and all(len(t.players) >= 18 for t in self.teams.values())
+            can_anyone_bid = any(len(t.players) < 18 and t.budget >= 30 for t in self.teams.values())
+
+            if all_squads_full or not can_anyone_bid:
+                self.finish_auction()
+                return
+
             trans = self.next_player()
             if trans:
                 await self.broadcast({
@@ -1062,6 +1190,24 @@ class Room:
         if not team:
             return {"success": False, "message": "Team not found"}
 
+        # Validate squad ownership (anti-cheat verification)
+        owned_ids = {p["id"] for p in team.players}
+        for pid in playing_xi:
+            if pid not in owned_ids:
+                return {"success": False, "message": f"Player {pid} is not in your squad!"}
+        for pid in bench:
+            if pid not in owned_ids:
+                return {"success": False, "message": f"Bench player {pid} is not in your squad!"}
+
+        if len(set(playing_xi)) != len(playing_xi):
+            return {"success": False, "message": "Duplicate players detected in Playing XI!"}
+
+        if set(playing_xi).intersection(set(bench)):
+            return {"success": False, "message": "A player cannot be in both Playing XI and Bench!"}
+
+        if captain_id and captain_id not in owned_ids:
+            return {"success": False, "message": "Selected captain is not in your squad!"}
+
         team.playing_xi = playing_xi
         team.bench = bench
         if captain_id:
@@ -1187,10 +1333,29 @@ class RoomManager:
         self.all_players = [normalize_player(p) for p in all_players]
         self.players_map = {p["id"]: p for p in self.all_players}
 
+    def cleanup_inactive_rooms(self, max_idle_seconds: int = 7200):
+        """Removes rooms that have been inactive for more than 2 hours with no active connections."""
+        now = time.time()
+        to_delete = []
+        for rid, room in self.rooms.items():
+            last = getattr(room, "last_active", room.created_at)
+            if not room.connections and (now - last) > max_idle_seconds:
+                to_delete.append(rid)
+        for rid in to_delete:
+            room = self.rooms.pop(rid, None)
+            if room:
+                if room.timer_task and not room.timer_task.done():
+                    room.timer_task.cancel()
+                if room.lineup_timer_task and not room.lineup_timer_task.done():
+                    room.lineup_timer_task.cancel()
+
     def get_or_create_room(self, room_id: str, name: str = "IPL Auction Arena") -> Room:
-        if room_id not in self.rooms:
-            self.rooms[room_id] = Room(room_id, name, self.all_players)
-        return self.rooms[room_id]
+        self.cleanup_inactive_rooms()
+        clean_id = room_id.strip().lower()
+        if clean_id not in self.rooms:
+            self.rooms[clean_id] = Room(clean_id, name, self.all_players)
+        return self.rooms[clean_id]
 
     def get_room(self, room_id: str) -> Optional[Room]:
-        return self.rooms.get(room_id)
+        clean_id = room_id.strip().lower()
+        return self.rooms.get(clean_id)

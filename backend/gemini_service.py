@@ -38,7 +38,7 @@ def generate_verdict_commentary(
             from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=12000))
 
             # Build a crisp payload for Gemini
             prompt_context = {
@@ -89,8 +89,9 @@ def generate_verdict_commentary(
                 "2. Explicitly analyze the captains' duel and leadership credentials."
             )
 
+            model_name = os.getenv("GEMINI_MODEL", "models/gemini-3.1-flash-lite")
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=f"Tournament Data:\n{json.dumps(prompt_context, indent=2)}\n\nGenerate the ESPN/Cricinfo style tournament report with captaincy clash analysis.",
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,

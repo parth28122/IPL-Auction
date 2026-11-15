@@ -34,7 +34,12 @@ def generate_player_sold_news(
     accounting for bidding wars, steals (Whistle Podu, Aava De, etc.), rival outbids, and hammer drama.
     """
     player_name = player.get("name", "Unknown Player")
-    buyer_name = winner_team.get("name", "A franchise")
+    team_name = winner_team.get("name", "A franchise")
+    owner_name = winner_team.get("owner_name")
+    if owner_name and owner_name != team_name and owner_name != "AI Franchise":
+        buyer_name = f"{owner_name} ({team_name})"
+    else:
+        buyer_name = team_name
     buyer_id = winner_team.get("team_id")
     base_price = player.get("base_price", 200) # Lakhs
     tier = player.get("tier", "Standard")
